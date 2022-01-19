@@ -1,0 +1,136 @@
+---
+title: "CCDF-Clustering-Interactive"
+author: "J. Meevis"
+date: "04/09/2020"
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This document described the current analysis and workflow to arrive at our initial personas (on a dummy dataset, i.e. our own website visitors).
+
+## Loading the data
+```{r}
+library(DBI)
+
+retrieve_app_cjm <- function() {
+  if (!DBI::dbCanConnect(RSQLite::SQLite(), "data/cjm-app.db")) {
+    stop("Cannot connect to DB, please verify settings!")
+  }
+  con = DBI::dbConnect(RSQLite::SQLite(), dbname="data/cjm-app.db")
+  activities = DBI::dbGetQuery(con, "SELECT * FROM cjm ORDER BY activitytime DESC LIMIT 10000") # retrieve all data
+  DBI::dbDisconnect(con)
+  return(activities)
+}
+activities = retrieve_app_cjm()
+renderTable(head(activities[c("sessionId", "id", "activityTime", "activity")]))
+```
+
+## Initial process map visualisation
+
+We will now show the initial process map and allow filtering based on the frequency of visited nodes. Clearly, a lot of nodes are very similar and only sporadically visited. In the next section, we will combine these nodes into larger nodes.
+
+```{r, echo = FALSE, warning=FALSE}
+library(bupaR)
+library(dplyr)
+library(DiagrammeR)
+library(processmapR)
+
+act_event = activities %>% 
+  mutate(
+    lifecycle = as.factor("completed"), 
+    instance_id = 1:nrow(activities),
+    resource = NA,
+    activityTime = lubridate::as_datetime(
+      activityTime, tz = "Europe/Amsterdam"
+    )
+  ) %>% 
+  eventlog(
+    case_id = "id",
+    activity_id = "activity",
+    activity_instance_id = "instance_id",
+    lifecycle_id = "lifecycle",
+    timestamp = "activityTime",
+    resource_id = "resource"
+  )
+
+inputPanel(
+  sliderInput("frequency", label = "Activity frequency filter:",
+              min = 0.1, max = 1, value = 0.95, step = 0.05)
+)
+renderGrViz({act_event %>% filter_activity_frequency(percentage = input$frequency) %>% process_map()})
+
+```
+
+## Data wrangling/cleaning
+
+Some activities are parts of 1 larger activity. For example, visiting a team member's webpage. For our process modelling, we do not care which exact member they visited but we do care that they visited some member. We will change the activities to reflect this. In this case, we achieve this by replacing activities with a 'super' activity, that contains the others.
+```{r, echo = FALSE}
+library(bupaR)
+library(dplyr)
+library(daqapo)
+library(stringr)
+act_event_filtered = act_event %>% mutate(
+    activity = if_else(str_detect(pagePath, "^\\/\\w+(-[a-z]+)+"), "PAGEVIEW - /some-team-member", as.character(activity)),
+    activity = if_else(str_detect(pagePath, "^\\/articles\\/"), "PAGEVIEW - /article/some-article", as.character(activity)),
+    activity = if_else(str_detect(pagePath, "^\\/\\?"), "PAGEVIEW - /", as.character(activity)),
+    activity = if_else(str_detect(pagePath, "^\\/translate_c"), "PAGEVIEW - translate", as.character(activity))
+    )
+
+
+inputPanel(
+  sliderInput("frequency_filter", label = "Activity frequency filter:",
+              min = 0.1, max = 1, value = 0.95, step = 0.05)
+)
+renderGrViz({act_event_filtered %>% filter_activity_frequency(percentage = input$frequency_filter) %>% process_map()})
+```
+
+## Initial clustering
+
+For our initial clustering analysis, we will simply employ an K-means algorithm. We re-arrange the data so that each user is one row, where the columns in that row indicate how often that user visited a certain page. This is a very naive algorithm that we will iterate on in the future (e.g. we will use sequencing instead of bag-of-activites methodology).
+
+```{r, echo=FALSE, warning=FALSE}
+library(factoextra)
+# Rewrite to activities per id
+act_n_per_id = (act_event_filtered %>% group_by(id, activity)
+     %>% add_tally() 
+     %>% ungroup() 
+     %>% tidyr::pivot_wider(names_from = activity, values_from = n, values_fill = 0)
+     %>% group_by(id) %>% summarise(across(which(colnames(.) == ".order"):ncol(.)-1, sum)))
+
+# pca for better plotting
+pca_res = prcomp(act_n_per_id %>% select(-id), center = T, scale = T)
+# summary(pca_res)
+# fviz_pca_ind(pca_res,
+#              col.ind = "cos2", # Color by the quality of representation,
+#              geom = c("point"),
+#              gradient.cols = "npg",
+# )
+# plot clusters
+# palette("ggplot2")
+palette(rainbow(10))
+
+inputPanel(
+  sliderInput("groups", label = "Number of groups:",
+              min = 2, max = 15, value = 10, step = 1),
+  sliderInput("x_axis", label = "PCA component x:",
+              min = 1, max = length(pca_res$sdev), value = 1, step = 1),
+  sliderInput("y_axis", label = "PCA component y:",
+              min = 1, max = length(pca_res$sdev), value = 2, step = 1)
+)
+renderPlot({
+  # perform clustering
+  clusters = kmeans(pca_res$x, centers = input$groups)
+  # append cluster determination
+  # act_n_per_id$cluster = clusters$cluster
+  # plot results from PCA
+  plot(pca_res$x[,input$x_axis], pca_res$x[,input$y_axis], col = clusters$cluster, cex = 1, pch = 19)
+})
+```
+
+
+
+

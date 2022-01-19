@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Behaviour cluster visualization</title>
+    <style>
+        body {
+            height: 95vh;
+            width: 95vw;
+        }
+
+        #circles {
+            margin: auto 10px;
+            width: 90vh;
+            height: 90vh;
+            border: 3px solid green;
+            padding: 10px;
+            float: left;
+        }
+
+        #dashboard {
+            position: absolute;
+            top: 0;
+            right: 10px;
+            float: right;
+        }
+
+        .node {
+            cursor: pointer;
+        }
+
+        .node:hover {
+            stroke: #000;
+            stroke-width: 1.5px;
+        }
+
+        .node--leaf {
+            fill: white;
+        }
+
+        .label {
+            font: 16px "Helvetica Neue", Helvetica, Arial, sans-serif;
+            text-anchor: middle;
+            text-shadow: 0 1px 0 #fff, 1px 0 0 #fff, -1px 0 0 #fff, 0 -1px 0 #fff;
+        }
+
+        .label,
+        .node--root,
+        /*.node--leaf*/ {
+            pointer-events: none;
+        }
+
+    </style>
+</head>
+<body>
+<div id="circles">
+
+</div>
+<div id="dashboard">
+
+</div>
+
+
+<script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"
+        integrity="sha384-DfXdz2htPH0lsSSs5nCTpuj/zy4C+OGpamoFVy38MVBnE+IbbVYUew+OrCXaRkfj"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@4.5.3/dist/js/bootstrap.bundle.min.js"
+        integrity="sha384-ho+j7jyWK8fNQe+A12Hb8AhRq26LrZ/JpcUGGOn+Y7RsweNrtN/tE3MoK7ZeZDyx"
+        crossorigin="anonymous"></script>
+<script src="https://d3js.org/d3.v4.min.js"></script>
+<script>
+
+    var margin = 10
+    var diameter = document.getElementById('circles').clientWidth - 2*margin
+    var svg = d3.select("#circles").append("svg")
+        .attr("width", diameter)
+        .attr("height", diameter)
+    var g = svg.append("g").attr("transform", "translate(" + (diameter / 2) + "," + (diameter / 2) + ")");
+
+    var color = d3.scaleLinear()
+        .domain([-1, 5])
+        .range(["hsl(152,80%,80%)", "hsl(228,30%,40%)"])
+        .interpolate(d3.interpolateHcl);
+
+    var pack = d3.pack()
+        .size([diameter - margin, diameter - margin])
+        .padding(2);
+
+    d3.json("all_purchase_clusters.json", function (error, root) {
+        if (error) throw error;
+
+        root = d3.hierarchy(root)
+            .sum(function (d) {
+                return d.size;
+            })
+            .sort(function (a, b) {
+                return b.value - a.value;
+            });
+
+        var focus = root,
+            nodes = pack(root).descendants(),
+            view;
+
+        var circle = g.selectAll("circle")
+            .data(nodes)
+            .enter().append("circle")
+            .attr("class", function (d) {
+                return d.parent ? d.children ? "node" : "node node--leaf" : "node node--root";
+            })
+            .style("fill", function (d) {
+                return d.children ? color(d.depth) : null;
+            })
+            .on("click", function (d) {
+                if (focus !== d) zoom(d), d3.event.stopPropagation();
+            });
+
+        var text = g.selectAll("text")
+            .data(nodes)
+            .enter().append("text")
+            .attr("class", "label")
+            .style("fill-opacity", function (d) {
+                return d.parent === root ? 1 : 0;
+            })
+            .style("display", function (d) {
+                return d.parent === root ? "inline" : "none";
+            })
+            .html(function (d) {
+                var ex_text = "(id:" + d.data.id + " path: " + d.data.path.substr(2) + ") Exclusions";
+                if (d.data.type === "l") {
+                    ex_text += " (Size: " + d.data.size + ")"
+                }
+                var str = '<tspan x="0" dy="0">' + ex_text + '</tspan>'
+                for (var i = 0; i < Math.min(d.data.exclusions.length, 2); i++) {
+                    var ex = d.data.exclusions[i]
+                    var score = d.data.exclusions_scores[i]
+                    if (i === 1 && d.data.exclusions.length > 2) {
+                        str += '<tspan x="0" dy="1.2em">' + (d.data.exclusions.length - 1) + ' more omitted...</tspan>'
+                    } else {
+                        str += '<tspan x="0" dy="1.2em">' + ex.toString() + ' (' + (score < 0 ? "rel. absence" : "rel. presence") + ')</tspan>'
+                    }
+                }
+                if (d.data.exclusions.length > 2) {
+
+                }
+                return str
+            });
+
+        var node = g.selectAll("circle,text");
+
+        svg
+            .style("background", color(-1))
+            .on("click", function () {
+                zoom(root);
+            });
+
+        zoomTo([root.x, root.y, root.r * 2 + margin]);
+
+        function zoom(d) {
+            var focus0 = focus;
+            focus = d;
+
+            var transition = d3.transition()
+                .duration(d3.event.altKey ? 7500 : 750)
+                .tween("zoom", function (d) {
+                    var i = d3.interpolateZoom(view, [focus.x, focus.y, focus.r * 2 + margin]);
+                    return function (t) {
+                        zoomTo(i(t));
+                    };
+                });
+
+            var dashboard = "<table><thead><tr><th>Incidence</th><th>Feature</th><th>&chi;<sup>2</sup>-Score</th></tr></thead><tbody>"
+            if (typeof(d.data.exclusions) !== "string") {
+                for (var i = 0; i < d.data.exclusions.length; i++) {
+                    var ex = d.data.exclusions[i]
+                    var score = d.data.exclusions_scores[i]
+                    dashboard += '<tr>' +
+                        '<td>' + (score < 0 ? "Less" : "More") + '</td>' +
+                        '<td>' + ex.toString() + '</td>' +
+                        '<td>' + Math.round(score * 100) / 100 + '</td>' +
+                        '</tr>'
+                }
+            }
+            dashboard += "</tbody></table>"
+            document.getElementById("dashboard").innerHTML = dashboard
+
+            transition.selectAll("text")
+                .filter(function (d) {
+                    return d.parent === focus || this.style.display === "inline";
+                })
+                .style("fill-opacity", function (d) {
+                    return d.parent === focus ? 1 : 0;
+                })
+                .on("start", function (d) {
+                    if (d.parent === focus) this.style.display = "inline";
+                })
+                .on("end", function (d) {
+                    if (d.parent !== focus) this.style.display = "none";
+                });
+        }
+
+        function zoomTo(v) {
+            var k = diameter / v[2];
+            view = v;
+            node.attr("transform", function (d) {
+                return "translate(" + (d.x - v[0]) * k + "," + (d.y - v[1]) * k + ")";
+            });
+            circle.attr("r", function (d) {
+                return d.r * k;
+            });
+        }
+    });
+
+</script>
+</body>
+</html>
